@@ -1,0 +1,224 @@
+---
+title: "Z-curve"
+output: html_document
+date: "2026-04-13"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+# ============================================================
+# Z-curve demo (p-values computed in R) + teaching printouts
+# Includes:
+#   1) R-computed p-values (no external calculator)
+#   2) Step-by-step conversion table: statistic -> p -> |z|
+#   3) z-curve fit + summaries
+#   4) Plot with built-in annotations + EFDR (Soric FDR) added
+# ============================================================
+
+library(zcurve)
+library(dplyr)
+library(stringr)
+library(readr)
+library(tibble)
+```
+
+```{r}
+# ----------------------------
+# 1) Helper functions
+# ----------------------------
+
+# Convert two-sided p-values to absolute z
+z_from_p_two_sided <- function(p) {
+  qnorm(1 - p / 2)
+}
+
+# Nice printing helper
+fmt <- function(x, digits = 4) {
+  formatC(x, digits = digits, format = "fg", flag = "#")
+}
+```
+
+
+```{r}
+# ----------------------------
+# 2) Enter extracted data from uploaded sheet
+#    Source: uploaded PDF extraction template
+# ----------------------------
+
+raw_dat <- tibble(
+  study_no = c(
+    "1 (ZH)", "2 (ZH)", "3 (ZH)", "4 (ZH)", "5 (ZH)",
+    "6 (J)", "7 (J)", "8 (ZH)", "9 (ZH)", "10 (ZH)",
+    "11 (SJ)", "12", "13 (ZH)", "14 (SJ)", "15 (SJ)",
+    "16 (J)", "17 (SJ)", "18 (SJ)", "19 (J)", "20 (J)",
+    "21 (EA)", "22 (ZH)", "23 (J)", "24 (E)", "25 (SJ)",
+    "26 (E)", "27 (J)", "28 (ZH)", "29 (E)", "30 (ZH)"
+  ),
+  exact_p = c(
+    0.0001,   # 1
+    0.001,    # 2
+    0.006,    # 3
+    0.0001,   # 4
+    0.0001,   # 5
+    0.001,    # 6
+    1e-6,     # 7
+    0.007,    # 8
+    0.01,     # 9
+    0.0001,   # 10
+    0.01,     # 11
+    0.0001,   # 12
+    0.007,    # 13
+    0.001,    # 14
+    0.001,    # 15
+    0.05,     # 16
+    0.001,    # 17
+    0.001,    # 18
+    NA,       # 19 not use
+    0.0003,   # 20
+    0.0001,   # 21
+    0.001,    # 22
+    0.001,    # 23
+    0.05,     # 24
+    0.005,    # 25
+    NA,       # 26 not use
+    NA,       # 27 not use
+    0.003,    # 28
+    1e-5,     # 29
+    1e-5      # 30
+  )
+)
+
+raw_dat
+```
+
+
+```{r}
+# ----------------------------
+# 3) Clean the data
+# ----------------------------
+zcurve_dat <- raw_dat %>%
+  mutate(
+    include = !is.na(exact_p),
+    exact_p = as.numeric(exact_p)
+  ) %>%
+  mice::filter(include) %>%
+  mice::filter(exact_p > 0, exact_p <= 1) %>%
+  mutate(
+    z_abs = z_from_p_two_sided(exact_p)
+  )
+
+zcurve_dat
+```
+
+```{r}
+# Optional: show excluded studies
+excluded_dat <- raw_dat %>%
+  mice::filter(is.na(exact_p))
+
+cat("\n==============================\n")
+cat("Excluded studies (marked not use):\n")
+cat("==============================\n\n")
+print(excluded_dat, n = nrow(excluded_dat))
+```
+
+
+
+```{r}
+# ----------------------------
+# 4) Step-by-step conversion table
+# ----------------------------
+
+conversion_table <- zcurve_dat %>%
+  transmute(
+    study_no = study_no,
+    p_value  = exact_p,
+    z_abs    = z_abs
+  )
+
+conversion_table_pretty <- conversion_table %>%
+  mutate(
+    p_value = fmt(p_value, 6),
+    z_abs   = fmt(z_abs, 4)
+  )
+
+cat("\n==============================\n")
+cat("Step-by-step conversion table:\n")
+cat("Exact p-value -> |z|\n")
+cat("==============================\n\n")
+
+print(conversion_table_pretty, n = nrow(conversion_table_pretty))
+
+```
+
+```{r}
+# ----------------------------
+# 5) Fit z-curve
+# ----------------------------
+
+Z_Scores <- zcurve_dat$z_abs
+fit <- zcurve(Z_Scores)
+
+print(summary(fit))
+print(summary(fit, all = TRUE))
+print(summary(fit, type = "parameters"))
+```
+
+```{r}
+# ----------------------------
+# 6) Print EFDR explicitly
+# ----------------------------
+
+sum_all <- summary(fit, all = TRUE)
+efdr <- sum_all$coefficients["Soric FDR", ]
+
+cat(sprintf(
+  "EFDR = %.3f (95%% CI [%.3f, %.3f])\n",
+  efdr["Estimate"], efdr["l.CI"], efdr["u.CI"]
+))
+```
+
+```{r}
+# ----------------------------
+# 7) Plot z-curve + annotation
+# ----------------------------
+
+sum_basic <- summary(fit)
+sum_all   <- summary(fit, all = TRUE)
+
+ODR <- mean(zcurve_dat$exact_p <= 0.05)
+
+EDR  <- sum_basic$coefficients["EDR", c("Estimate", "l.CI", "u.CI")]
+ERR  <- sum_basic$coefficients["ERR", c("Estimate", "l.CI", "u.CI")]
+EFDR <- sum_all$coefficients["Soric FDR", c("Estimate", "l.CI", "u.CI")]
+
+annot_text <- paste(
+  sprintf("Observed discovery rate:\n%.2f", ODR),
+  sprintf("Estimated discovery rate:\n%.2f  95%% CI [%.2f, %.2f]",
+          EDR[1], EDR[2], EDR[3]),
+  sprintf("Expected replicability rate:\n%.2f  95%% CI [%.2f, %.2f]",
+          ERR[1], ERR[2], ERR[3]),
+  sprintf("Expected false discovery rate:\n%.2f  95%% CI [%.2f, %.2f]",
+          EFDR[1], EFDR[2], EFDR[3]),
+  sep = "\n\n"
+)
+
+plot(
+  fit,
+  CI = TRUE,
+  annotation = FALSE,
+  main = "Z-curve from uploaded FFA extraction sheet"
+)
+
+usr <- par("usr")
+text(
+  x = usr[2] - 0.02 * diff(usr[1:2]),
+  y = usr[4] - 0.05 * diff(usr[3:4]),
+  labels = annot_text,
+  adj = c(1, 1),
+  cex = 0.85
+)
+```
+
